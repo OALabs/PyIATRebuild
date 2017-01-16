@@ -3,6 +3,7 @@ Use this library to automatically rebuild the import address table for a PE dump
 
 **WARNING!** I only wrote this because I couldn't find an existing tool with python bindings. 
 This is _not_ a replacement for ImpREC. ImpREC will always be a better choice because it's awesome and eats malware for breakfast while shooting lasers out of it's eyes!! ImpREC and malware analysts form like Voltron! 
+
 ![](http://reactiongifs.me/wp-content/uploads/2013/12/Christmas-reindeer-transformer-santa-claus-warrior-psychedelic-reindeer.gif)
 
 Only use this inferior tool if you need to do some automated reconstruction via python.
