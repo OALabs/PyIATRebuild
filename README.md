@@ -30,10 +30,11 @@ Winappdb can be installed via pip.
 **Do not** install the version of elfesteem available via pip. This version is old and won't work with our library. Instead, clone the repository [https://github.com/serpilliere/elfesteem](https://github.com/serpilliere/elfesteem) and install from there.
 
 ### distorm3
-Though distorm3 pretends that it can be installed via pip we all know it's going to fail for some reason. Just save yourself the headache and download the installer from [https://pypi.python.org/pypi/distorm3](https://pypi.python.org/pypi/distorm3') and install it that way.
+Though distorm3 pretends that it can be installed via pip we all know it's going to fail for some reason. Just save yourself the headache and download the installer from [https://pypi.python.org/pypi/distorm3](https://pypi.python.org/pypi/distorm3) and install it that way.
 
 ## Usage
-This is really meant to be used as a library but there is a small cli example included. 
+This is really meant to be used as a library but there is a small cli example included.
+ 
 `python PyIATRebuild.py --pid 3368 --base_address 589824 --oep 598738 dumped.bin out.exe`
 
 ### ProTip
