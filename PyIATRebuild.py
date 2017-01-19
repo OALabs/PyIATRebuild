@@ -35,14 +35,16 @@
 import sys
 import struct
 import argparse
-import os
+import os as p_os
 
 # This is not cross platform! 
 # How can you attach to PE process on anything but windows :)
 # If you try to force this you will find some nice evil errors with winappdbg at execution time...
 assert sys.platform == "win32", "This library can only be run on Windows!"
 
+import winappdbg
 from winappdbg import System, Process
+from winappdbg.win32 import *
 
 from elfesteem import pe_init
 
@@ -55,7 +57,7 @@ except ImportError as e:
 
 
 __AUTHOR__ = '@herrcore'
-__VERSION__ = 0.1
+__VERSION__ = 0.2
 
 
 
@@ -137,6 +139,7 @@ def reslove_iat_pointers(pid, iat_ptrs):
         if function != None:
             imp_table[iat_ptr] = [module, function]
 
+    assert len(imp_table) != 0, "Unable to find imports in code!"
     
     ######################################################################
     #
@@ -157,7 +160,7 @@ def reslove_iat_pointers(pid, iat_ptrs):
 
 
 def rebuild_iat(pid, pe_data, base_address, oep):
-    """
+    """Rebuild the import address table for the pe_data that was passed.
     @param pid: process ID for winappdbg to attach to and dump IAT offsets
     @param pe_data: full PE file read in as a binary string
     @param base_address: base address of PE (this override the base addres set in the pe_data)
@@ -316,24 +319,207 @@ def rebuild_iat(pid, pe_data, base_address, oep):
     return str(pf)
 
 
+def get_mem_map(process):
+    """Get a memory map of process
+    @param process: winappdbg.process object
+    @return list: [ {'BaseAddress': <>, 'RegionSize' <>, 'State': <>, 'Protect': <>, 'Type': <> 'Owner': <> }, ... ]
+    """
+    # Get the process memory map
+    memoryMap = process.get_memory_map()
 
+    # For each memory block in the map...
+    #mem_map = [... , {Address, Size, State, Access, Type, Owner}]
+    mem_map_arr = []
+    for mbi in memoryMap:
+        mem_page = {}
+        # Address and size of memory block.
+        mem_page['BaseAddress'] = mbi.BaseAddress
+        mem_page['RegionSize'] = mbi.RegionSize
+
+        # State (free or allocated).
+        if   mbi.State == MEM_RESERVE:
+            mem_page['State'] = "Reserved"
+        elif mbi.State == MEM_COMMIT:
+            mem_page['State'] = "Commited"
+        elif mbi.State == MEM_FREE:
+            mem_page['State'] = "Free"
+        else:
+            mem_page['State'] = "Unknown"
+
+        # Page protection bits (R/W/X/G).
+        if mbi.State != MEM_COMMIT:
+            mem_page['Protect'] = ""
+        else:
+            if   mbi.Protect & PAGE_NOACCESS:
+                mem_page['Protect'] = "--- "
+            elif mbi.Protect & PAGE_READONLY:
+                mem_page['Protect'] = "R-- "
+            elif mbi.Protect & PAGE_READWRITE:
+                mem_page['Protect'] = "RW- "
+            elif mbi.Protect & PAGE_WRITECOPY:
+                mem_page['Protect'] = "RC- "
+            elif mbi.Protect & PAGE_EXECUTE:
+                mem_page['Protect'] = "--X "
+            elif mbi.Protect & PAGE_EXECUTE_READ:
+                mem_page['Protect'] = "R-X "
+            elif mbi.Protect & PAGE_EXECUTE_READWRITE:
+                mem_page['Protect'] = "RWX "
+            elif mbi.Protect & PAGE_EXECUTE_WRITECOPY:
+                mem_page['Protect'] = "RCX "
+            else:
+                mem_page['Protect'] = "??? "
+
+            if   mbi.Protect & PAGE_GUARD:
+                mem_page['Protect'] += "G"
+            else:
+                mem_page['Protect'] += "-"
+
+            if   mbi.Protect & PAGE_NOCACHE:
+                mem_page['Protect'] += "N"
+            else:
+                mem_page['Protect'] += "-"
+
+            if   mbi.Protect & PAGE_WRITECOMBINE:
+                mem_page['Protect'] += "W"
+            else:
+                mem_page['Protect'] += "-"
+
+        # Type (file mapping, executable image, or private memory).
+        if   mbi.Type == MEM_IMAGE:
+            mem_page['Type'] = "Image"
+        elif mbi.Type == MEM_MAPPED:
+            mem_page['Type'] = "Mapped"
+        elif mbi.Type == MEM_PRIVATE:
+            mem_page['Type'] = "Private"
+        elif mbi.Type == 0:
+            mem_page['Type'] = "Free"
+        else:
+            mem_page['Type'] = "Unknown"
+
+        # Get the page owner
+        hProcess = process.get_handle( PROCESS_VM_READ | PROCESS_QUERY_INFORMATION ) 
+        mem_page['Owner'] = ''
+        if mbi.Type in (MEM_IMAGE, MEM_MAPPED): 
+            try:
+                fileName = GetMappedFileName(hProcess, mbi.BaseAddress) 
+                file_path = winappdbg.PathOperations.native_to_win32_pathname(fileName)
+                mem_page['Owner'] = p_os.path.basename(file_path)
+            except WindowsError, e: 
+                mem_page['Owner'] = "???"
+
+        #add page info to map
+        mem_map_arr.append(mem_page)
+    return mem_map_arr
+
+
+def dump_and_rebuild(pid, oep):
+    '''Dump process and rebuild with new original entry point.
+    @param pid: process ID
+    @param oep: original entry point
+    '''
+    System.request_debug_privileges()
+    process = Process( pid )
+    try:
+        process.suspend()
+    except WindowsError as e:
+        pass
+    file_path = process.get_filename()
+    file_name = p_os.path.basename(file_path)
+
+    #######################################################################
+    # 
+    # REBUILD THE DUMPED PE
+    #
+    # I'm sure there is a better way to do this because all we are really 
+    # doing is dumping the PE mapped sections. Suggestions welcome!
+    #
+    # The crazy way we do this is to get a memory map of the whole process
+    # then find the pages that are owned by the file that spawned the process.
+    #
+    #######################################################################
+    mem_map = get_mem_map(process)
+
+    temp_data_arr = {}
+    for page in mem_map:
+        if file_name.upper() in page["Owner"].upper():
+            dump_data = process.peek(page["BaseAddress"],page["RegionSize"])
+            temp_data_arr[page["BaseAddress"]] = dump_data
+    
+    # we need to work with the dump as one contiguous data block in "mapped" format.
+    ordered_mem = temp_data_arr.keys()
+    ordered_mem.sort()
+    block_data = temp_data_arr[ordered_mem[0]]
+    for addr_ptr in range(1,len(ordered_mem)):
+        padding_len  = ordered_mem[addr_ptr] - (ordered_mem[0] + len(block_data))
+        #print "Padding: %d" % padding_len
+        # These should be contiguous pages so there should be no need for padding!
+        block_data += temp_data_arr[ordered_mem[addr_ptr]] + '\x00'*padding_len
+
+    # The lowest mapped section is the base address
+    base_address = ordered_mem[0]
+
+    # Elfesteem has a small issue with the way it loads mapped PE files
+    # instead of using the virtual size for segments it uses the raw size
+    # this messes up unpacker dumps so we will fix it manually. 
+
+    pf = pe_init.PE(loadfrommem=True, pestr=block_data)
+    new_sections = []
+    for tmp_section in pf.SHList:
+         new_sections.append({"name": tmp_section.name ,"offset": tmp_section.addr ,"size": tmp_section.size ,"addr": tmp_section.addr ,"flags": tmp_section.flags ,"rawsize": tmp_section.size})
+
+    # Remove existing sections
+    pf.SHList.shlist=[]
+    
+    for tmp_section in new_sections:
+        pf.SHList.add_section(name=tmp_section["name"], 
+            data=block_data[tmp_section["offset"]:tmp_section["offset"] + tmp_section["rawsize"]], 
+            size=tmp_section["size"], 
+            addr=tmp_section["addr"], 
+            offset=tmp_section["offset"], 
+            rawsize=tmp_section["rawsize"])
+
+    pf.NThdr.ImageBase = base_address
+    pf.Opthdr.AddressOfEntryPoint = oep
+    # Disable rebase, since addresses are absolute any rebase will make this explode
+    pf.NThdr.dllcharacteristics = 0x0
+
+    #######################################################################
+    # 
+    # At this point pf contains a fully reconstructed PE but with a 
+    # broken IAT. Fix the IAT!
+    #
+    #######################################################################
+    return rebuild_iat(pid, str(pf), base_address, oep)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Simple example of PyIATRebuild library in use!")
-    parser.add_argument("infile", help="The file to fix IAT.")
-    parser.add_argument("outfile", help="The file to write results.")
-    parser.add_argument('--pid',dest="in_pid",type=int,default=None,required=True,help="Specify process ID to export IAT from.")
-    parser.add_argument('--base_address',dest="in_base_address",type=int,default=None,required=True,help="Specify base address the process is loaded at (will overwrite PE).")
-    parser.add_argument('--oep',dest="in_oep",type=int,default=None,required=True,help="Specify original entry point for process, virtual address not RVA (will overwrite PE).")
+    subparsers = parser.add_subparsers(help='', dest='subparser_name')
+
+    # create the parser for the load command
+    parser_rebuild = subparsers.add_parser('rebuild', help='Load dumped PE from file, attach to process, and rebuild IAT.')
+    parser_rebuild.add_argument("infile", help="The file to fix IAT.")
+    parser_rebuild.add_argument("outfile", help="The file to write results.")
+    parser_rebuild.add_argument('--pid',dest="in_pid",type=int,default=None,required=True,help="Specify process ID to export IAT from.")
+    parser_rebuild.add_argument('--base_address',dest="in_base_address",type=int,default=None,required=True,help="Specify base address the process is loaded at (will overwrite PE).")
+    parser_rebuild.add_argument('--oep',dest="in_oep",type=int,default=None,required=True,help="Specify original entry point for process, virtual address not RVA (will overwrite PE).")
+
+    # create the parser for the results command
+    parser_dump = subparsers.add_parser('dump', help='Attach to process, dump, and rebuild IAT.')
+    parser_dump.add_argument("outfile", help="The file to write results.")
+    parser_dump.add_argument('--pid',dest="in_pid",type=int,default=None,required=True,help="Specify process ID to export IAT from.")
+    parser_dump.add_argument('--oep',dest="in_oep",type=int,default=None,required=True,help="Specify original entry point for process, virtual address not RVA (will overwrite PE).")
     args = parser.parse_args()
 
-    with open(args.infile,"rb") as fp:
-        pe_data= fp.read()
+    if args.subparser_name == "rebuild":
+        with open(args.infile,"rb") as fp:
+            pe_data= fp.read()
+        new_pe_data = rebuild_iat(args.in_pid, pe_data, args.in_base_address, args.in_oep)
+        open(args.outfile, 'wb').write(new_pe_data)
 
-    new_pe_data = rebuild_iat(args.in_pid, pe_data, args.in_base_address, args.in_oep)
-
-    open(args.outfile, 'wb').write(new_pe_data)
+    elif args.subparser_name == "dump":
+        new_pe_data = dump_and_rebuild(args.in_pid, args.in_oep)
+        open(args.outfile, 'wb').write(new_pe_data)
 
 if __name__ == '__main__':
     main()
