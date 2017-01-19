@@ -47,6 +47,7 @@ This is really meant to be used as a library but there is a small cli example in
 If you don't need to rebuild a full PE and just want to resolve some pointers to import into IDA you can pass a list of pointers and the PID to pyiatrebuild.reslove_iat_pointers and it will return a dictionary with the module and function names resolved for the pointers you provided. 
 
 ## Acknowledgments
+* Firstly! Thank you to the @volatilityfoundation team! PyIATRebuild is in debt to them for the idea and some of the logic!
 * Big thank you to @MarioVilas for the wonder that is winappdbg
 * Also, huge thank you to @serpilliere (Fabrice DESCLAUX) and Philippe Biondi for elfesteem
 * Lastly, hat tip to @kbandla for the [immunity scripts](https://github.com/kbandla/ImmunityDebuggerScripts) shedding some light on how to do things more efficiently.
