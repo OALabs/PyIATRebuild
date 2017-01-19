@@ -3,7 +3,7 @@ import os
 
 
 setup(
-    name='pyaitrebuild',
+    name='pyiatrebuild',
     version=0.2,
     url='https://github.com/OALabs/PyIATRebuild',
     author="OpenAnalysis",
