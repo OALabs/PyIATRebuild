@@ -4,7 +4,7 @@ import os
 
 setup(
     name='pyiatrebuild',
-    version=0.2,
+    version=0.5,
     url='https://github.com/OALabs/PyIATRebuild',
     author="OpenAnalysis",
     description="Import address rebuild and PE dump.",

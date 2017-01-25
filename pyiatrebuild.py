@@ -79,7 +79,7 @@ def _call_or_unc_jmp(op):
     return ((op.flowControl == 'FC_CALL' and op.mnemonic == "CALL") or  (op.flowControl == 'FC_UNC_BRANCH' and  op.mnemonic == "JMP"))
 
 
-def call_scan(data_vr_address, data):
+def call_scan(data_vr_address, data, start_limit=None, end_limit=None):
     """Disassemble a block of data and yield possible 
     calls to imported functions. We're looking for 
     instructions such as these:
@@ -87,8 +87,24 @@ def call_scan(data_vr_address, data):
     CALL DWORD [0x1000400]
     JMP  DWORD [0x1000400]
     """
+    # Call scan has two options based on the limit settings
+    # if there are no limits then only potential IAT pointers 
+    # to inside the scanned data will be kept. This is useful 
+    # if you are scanning a data blob and are not able to resolve 
+    # outside the blob.
+    #
+    # If the limits are set then any potential IAT pointers to
+    # inside the limits are kept. This is useful if you are 
+    # scanning the code segment of a PE file but your IAT may
+    # be located in another segment in the PE file. Set the 
+    # limits to be the start and end of the mapped PE.
+    #
+    if start_limit == None:
+        start_limit = data_vr_address
+    if end_limit ==None:
+        end_limit = data_vr_address + len(data)
+
     iat_ptrs=[]
-    end_address = data_vr_address + len(data)
     mode = distorm3.Decode32Bits
     for op in distorm3.DecomposeGenerator(data_vr_address, data, mode):
         if not op.valid:
@@ -96,7 +112,7 @@ def call_scan(data_vr_address, data):
         iat_loc = None
         if (_call_or_unc_jmp(op) and op.operands[0].type == 'AbsoluteMemoryAddress'):
             iat_loc = (op.operands[0].disp) & 0xffffffff
-        if (not iat_loc or (iat_loc < data_vr_address) or (iat_loc > end_address)):
+        if (not iat_loc or (iat_loc < start_limit) or (iat_loc > end_limit)):
             continue
         # resolve iat_loc to API
         #print iat_loc
@@ -159,12 +175,14 @@ def reslove_iat_pointers(pid, iat_ptrs):
     return imp_table_new
 
 
-def rebuild_iat(pid, pe_data, base_address, oep):
+def rebuild_iat(pid, pe_data, base_address, oep, newimpdir="newimpdir", newiat="newiat"):
     """Rebuild the import address table for the pe_data that was passed.
     @param pid: process ID for winappdbg to attach to and dump IAT offsets
     @param pe_data: full PE file read in as a binary string
     @param base_address: base address of PE (this override the base addres set in the pe_data)
     @param oep: original entry point of the PE (this override the base addres set in the pe_data)
+    @param newimpdir: name for new section that will contain imports
+    @param newiat: name for new section that will contain new IAT
     """
 
     # TODO: this load wants the PE in mapped format, we need to update instructions or update the loadfrommem param
@@ -196,7 +214,7 @@ def rebuild_iat(pid, pe_data, base_address, oep):
         tmp_end = tmp_start + tmp_sec.size
         if (rva_oep >= tmp_start) and (rva_oep <= tmp_end):
             try:
-                pdata = pf._rva.get(tmp_start,tmp_sec.size)
+                pdata = pf._rva.get(tmp_start,tmp_end)
             except AttributeError as e:
                 raise AttributeError("You are using the wrong version of elfesteem, don't use pip instead install from https://github.com/serpilliere/elfesteem")
             data_vr_addr = base_address + tmp_start
@@ -210,7 +228,8 @@ def rebuild_iat(pid, pe_data, base_address, oep):
 
     # find all call/jmp to possible IAT function pointers
     # iat_ptrs is a list of all the addresses that are potential IAT pointers
-    iat_ptrs = call_scan(data_vr_addr, pdata)
+    iat_ptrs = call_scan(data_vr_addr, pdata, start_limit=base_address, end_limit=base_address+len(pe_data))
+    assert len(iat_ptrs) != 0, "Unable to find IAT pointer candidates in code!"
 
     imp_table = reslove_iat_pointers(pid, iat_ptrs)
 
@@ -234,7 +253,7 @@ def rebuild_iat(pid, pe_data, base_address, oep):
 
     newiat_rawsize = (( (len(imp_table.keys()) * 4 ) / 0x1000) + 1) * 0x1000
     # Create new section to hold new IAT 
-    s_newiat = pf.SHList.add_section(name="newiat", rawsize=newiat_rawsize)
+    s_newiat = pf.SHList.add_section(name=newiat, rawsize=newiat_rawsize)
 
     ######################################################################
     #
@@ -254,7 +273,7 @@ def rebuild_iat(pid, pe_data, base_address, oep):
     ######################################################################
     pf.DirImport.add_dlldesc(new_dll)
     newimpdir_rawsize = ((len(pf.DirImport) / 0x1000) + 1) * 0x1000
-    s_newimpdir = pf.SHList.add_section(name="newimpdir", rawsize=newimpdir_rawsize)
+    s_newimpdir = pf.SHList.add_section(name=newimpdir, rawsize=newimpdir_rawsize)
     pf.SHList.align_sections(0x1000, 0x1000)
     pf.DirImport.set_rva(s_newimpdir.addr)
     
@@ -263,6 +282,8 @@ def rebuild_iat(pid, pe_data, base_address, oep):
     #
     # Create a mapping from the old IAT pointers to the new ones
     # iat_map[ <old_pointer> ] = <new_pointer>
+    #
+    # TODO: handle import by ordinal 
     #
     ######################################################################
     iat_map ={}
@@ -412,10 +433,12 @@ def get_mem_map(process):
     return mem_map_arr
 
 
-def dump_and_rebuild(pid, oep):
+def dump_and_rebuild(pid, oep, newimpdir="newimpdir", newiat="newiat"):
     '''Dump process and rebuild with new original entry point.
     @param pid: process ID
     @param oep: original entry point
+    @param newimpdir: name for new section that will contain imports
+    @param newiat: name for new section that will contain new IAT
     '''
     System.request_debug_privileges()
     process = Process( pid )
@@ -489,7 +512,7 @@ def dump_and_rebuild(pid, oep):
     # broken IAT. Fix the IAT!
     #
     #######################################################################
-    return rebuild_iat(pid, str(pf), base_address, oep)
+    return rebuild_iat(pid, str(pf), base_address, oep, newimpdir=newimpdir, newiat=newiat)
 
 
 def main():
