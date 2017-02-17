@@ -57,7 +57,7 @@ except ImportError as e:
 
 
 __AUTHOR__ = '@herrcore'
-__VERSION__ = 0.2
+__VERSION__ = 0.6
 
 
 
@@ -175,7 +175,7 @@ def reslove_iat_pointers(pid, iat_ptrs):
     return imp_table_new
 
 
-def rebuild_iat(pid, pe_data, base_address, oep, newimpdir="newimpdir", newiat="newiat"):
+def rebuild_iat(pid, pe_data, base_address, oep, newimpdir="newimpdir", newiat="newiat", loadfrommem=True):
     """Rebuild the import address table for the pe_data that was passed.
     @param pid: process ID for winappdbg to attach to and dump IAT offsets
     @param pe_data: full PE file read in as a binary string
@@ -183,10 +183,10 @@ def rebuild_iat(pid, pe_data, base_address, oep, newimpdir="newimpdir", newiat="
     @param oep: original entry point of the PE (this override the base addres set in the pe_data)
     @param newimpdir: name for new section that will contain imports
     @param newiat: name for new section that will contain new IAT
+    @param loadfrommem: pe data is mapped or unmapped (default mapped)
     """
 
-    # TODO: this load wants the PE in mapped format, we need to update instructions or update the loadfrommem param
-    pf = pe_init.PE(loadfrommem=True, pestr=pe_data)
+    pf = pe_init.PE(loadfrommem=loadfrommem, pestr=pe_data)
 
     pf.NThdr.ImageBase = base_address
 
@@ -433,6 +433,99 @@ def get_mem_map(process):
     return mem_map_arr
 
 
+
+def dump_and_rebuild_pe_based(pid, oep, orig_pe, newimpdir="newimpdir", newiat="newiat"):
+    '''Dump pe-based packer process and rebuild with new original entry point.
+    This function requires the original PE file in order to use the header and 
+    header corrumption anti-dumping techniques.
+    @param pid: process ID
+    @param oep: original entry point
+    @param orig_pe: binary string containing unmapped original PE file 
+    @param newimpdir: name for new section that will contain imports
+    @param newiat: name for new section that will contain new IAT
+    '''
+    System.request_debug_privileges()
+    process = Process( pid )
+    try:
+        process.suspend()
+    except WindowsError as e:
+        pass
+    file_path = process.get_filename()
+    file_name = p_os.path.basename(file_path)
+
+    #######################################################################
+    # 
+    # REBUILD THE DUMPED PE
+    #
+    # I'm sure there is a better way to do this because all we are really 
+    # doing is dumping the PE mapped sections. Suggestions welcome!
+    #
+    # The crazy way we do this is to get a memory map of the whole process
+    # then find the pages that are owned by the file that spawned the process.
+    #
+    #######################################################################
+    mem_map = get_mem_map(process)
+
+    temp_data_arr = {}
+    for page in mem_map:
+        if file_name.upper() in page["Owner"].upper():
+            dump_data = process.peek(page["BaseAddress"],page["RegionSize"])
+            temp_data_arr[page["BaseAddress"]] = dump_data
+    
+    # we need to work with the dump as one contiguous data block in "mapped" format.
+    ordered_mem = temp_data_arr.keys()
+    ordered_mem.sort()
+    block_data = temp_data_arr[ordered_mem[0]]
+    for addr_ptr in range(1,len(ordered_mem)):
+        padding_len  = ordered_mem[addr_ptr] - (ordered_mem[0] + len(block_data))
+        #print "Padding: %d" % padding_len
+        # These should be contiguous pages so there should be no need for padding!
+        block_data += temp_data_arr[ordered_mem[addr_ptr]] + '\x00'*padding_len
+
+    # The lowest mapped section is the base address
+    base_address = ordered_mem[0]
+
+    # Elfesteem has a small issue with the way it loads mapped PE files
+    # instead of using the virtual size for segments it uses the raw size
+    # this messes up unpacker dumps so we will fix it manually. 
+
+    pf = pe_init.PE(loadfrommem=False, pestr=orig_pe)
+    new_sections = []
+    for tmp_section in pf.SHList:
+         new_sections.append({"name": tmp_section.name ,"offset": tmp_section.addr ,"size": tmp_section.size ,"addr": tmp_section.addr ,"flags": tmp_section.flags ,"rawsize": tmp_section.size})
+
+    # Remove existing sections
+    pf.SHList.shlist=[]
+    
+    for tmp_section in new_sections:
+        pf.SHList.add_section(name=tmp_section["name"], 
+            data=block_data[tmp_section["offset"]:tmp_section["offset"] + tmp_section["rawsize"]], 
+            size=tmp_section["size"], 
+            addr=tmp_section["addr"], 
+            offset=tmp_section["offset"], 
+            rawsize=tmp_section["rawsize"])
+
+    pf.NThdr.ImageBase = base_address
+    pf.Opthdr.AddressOfEntryPoint = oep
+    # Disable rebase, since addresses are absolute any rebase will make this explode
+    pf.NThdr.dllcharacteristics = 0x0
+
+    # Null out the imports they will be wrong anyway and may cause issues when importing into elfesteem
+    try:
+        pf.DirImport.impdesc.l=[]
+    except:
+        pf.DirImport.impdesc =[]
+
+    #######################################################################
+    # 
+    # At this point pf contains a fully reconstructed PE but with a 
+    # broken IAT. Fix the IAT!
+    #
+    #######################################################################
+    return rebuild_iat(pid, str(pf), base_address, oep, newimpdir=newimpdir, newiat=newiat, loadfrommem=False)
+
+
+
 def dump_and_rebuild(pid, oep, newimpdir="newimpdir", newiat="newiat"):
     '''Dump process and rebuild with new original entry point.
     @param pid: process ID
@@ -512,7 +605,7 @@ def dump_and_rebuild(pid, oep, newimpdir="newimpdir", newiat="newiat"):
     # broken IAT. Fix the IAT!
     #
     #######################################################################
-    return rebuild_iat(pid, str(pf), base_address, oep, newimpdir=newimpdir, newiat=newiat)
+    return rebuild_iat(pid, str(pf), base_address, oep, newimpdir=newimpdir, newiat=newiat, loadfrommem=False)
 
 
 def main():
