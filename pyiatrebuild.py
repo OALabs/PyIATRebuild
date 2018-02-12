@@ -86,6 +86,10 @@ def call_scan(data_vr_address, data, start_limit=None, end_limit=None):
     x86:
     CALL DWORD [0x1000400]
     JMP  DWORD [0x1000400]
+    We also capture indirect call where the API address is moved into
+    a register and the regsiter is called:
+    MOV ECX [0x9400c]
+    CALL ECX Register
     """
     # Call scan has two options based on the limit settings
     # if there are no limits then only potential IAT pointers 
@@ -105,6 +109,7 @@ def call_scan(data_vr_address, data, start_limit=None, end_limit=None):
         end_limit = data_vr_address + len(data)
 
     iat_ptrs=[]
+    reg_redirect = {"EAX":0x0, "EBX":0x0, "ECX":0x0, "EDX":0x0}
     mode = distorm3.Decode32Bits
     for op in distorm3.DecomposeGenerator(data_vr_address, data, mode):
         if not op.valid:
@@ -112,6 +117,12 @@ def call_scan(data_vr_address, data, start_limit=None, end_limit=None):
         iat_loc = None
         if (_call_or_unc_jmp(op) and op.operands[0].type == 'AbsoluteMemoryAddress'):
             iat_loc = (op.operands[0].disp) & 0xffffffff
+        if op.mnemonic == "MOV" and op.operands[0].type == 'Register' and op.operands[1].type == 'AbsoluteMemoryAddress':
+            #print "MOV %s %s %s" % (op.operands[0], op.operands[1], op.operands[1].type)
+            reg_redirect[str(op.operands[0])] =op.operands[1].disp
+        if op.mnemonic == "CALL" and op.operands[0].type == 'Register':
+            #print "CALL %s %s" % (op.operands[0], op.operands[0].type)
+            iat_loc = reg_redirect[str(op.operands[0])]
         if (not iat_loc or (iat_loc < start_limit) or (iat_loc > end_limit)):
             continue
         # resolve iat_loc to API
