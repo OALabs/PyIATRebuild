@@ -117,7 +117,7 @@ def call_scan(data_vr_address, data, start_limit=None, end_limit=None):
         iat_loc = None
         if (_call_or_unc_jmp(op) and op.operands[0].type == 'AbsoluteMemoryAddress'):
             iat_loc = (op.operands[0].disp) & 0xffffffff
-        if op.mnemonic == "MOV" and op.operands[0].type == 'Register' and op.operands[1].type == 'AbsoluteMemoryAddress':
+        if op.mnemonic == "MOV" and op.operands[0].type == 'Register' and (op.operands[1].type == 'AbsoluteMemoryAddress'  or op.operands[1].type == 'AbsoluteMemory'):
             #print "MOV %s %s %s" % (op.operands[0], op.operands[1], op.operands[1].type)
             reg_redirect[str(op.operands[0])] =op.operands[1].disp
         if op.mnemonic == "CALL" and op.operands[0].type == 'Register':
